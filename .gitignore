@@ -54,6 +54,6 @@ Desktop.ipynb_checkpoints
 
 # Custom
 data/*
-temp/*
+tmp/*
 gen/*
 *bk*
