@@ -57,4 +57,6 @@ data/*
 tmp/*
 gen/*
 spt/*
+models/*
 *bk*
+*.pdf
