@@ -58,6 +58,7 @@ tmp/*
 gen/*
 spt/*
 models/*
+logs/*
 model-variants/*
 *bk*
 *.pdf
