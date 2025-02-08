@@ -58,5 +58,6 @@ tmp/*
 gen/*
 spt/*
 models/*
+model-variants/*
 *bk*
 *.pdf
