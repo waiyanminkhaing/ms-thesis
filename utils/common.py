@@ -1,5 +1,6 @@
 import bert_score
 import torch
+import pandas as pd
 from torch.utils.data import DataLoader
 from utils.custom_class import EvaluationDataset
 from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
@@ -161,3 +162,24 @@ def compute_multilingual_mt5_perplexity_batch(dataloader, model, tokenizer, spt_
         predictions.extend(decoded_output)
 
     return predictions
+
+# function to create mean scores dataset
+def convert_to_mean_scores_df(datasets):
+    # Compute mean scores dynamically using a dictionary comprehension
+    benchmarking_mean_scores = {
+        model: {
+            "BLEU": dataset["bleu"].mean(),
+            "ROUGE-1": dataset["rouge-1"].mean(),
+            "ROUGE-2": dataset["rouge-2"].mean(),
+            "ROUGE-L": dataset["rouge-l"].mean(),
+            "chrF-S": dataset["chrf-s"].mean(),
+            "BERT Score": dataset["bert_score"].mean(),
+            "Perplexity": dataset["perplexity"].mean(),
+        }
+        for model, dataset in datasets.items()
+    }
+
+    # Convert mean scores dictionary to DataFrame for better visualization
+    benchmarking_mean_scores_df = pd.DataFrame.from_dict(benchmarking_mean_scores, orient='index')
+
+    return benchmarking_mean_scores_df
