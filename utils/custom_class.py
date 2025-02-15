@@ -1,4 +1,7 @@
 from torch.utils.data import Dataset
+import torch
+from transformers import TrainerCallback
+from tqdm import tqdm
 
 class TextDataset(Dataset):
     """
@@ -29,11 +32,12 @@ class EvaluationDataset(Dataset):
     
 # dataset class for masked
 class MaskedTextDataset(Dataset):
-    def __init__(self, texts, tokenizer, mask_ratio=0.15, max_length=128):
+    def __init__(self, texts, tokenizer, device, mask_ratio=0.15, max_length=128):
         self.texts = texts
         self.tokenizer = tokenizer
         self.mask_ratio = mask_ratio
         self.max_length = max_length
+        self.device = device
 
     def __len__(self):
         return len(self.texts)
@@ -46,8 +50,8 @@ class MaskedTextDataset(Dataset):
             text, return_tensors="pt", truncation=True, padding="max_length", max_length=self.max_length
         )
         
-        input_ids = inputs["input_ids"].squeeze(0).to(device)
-        attention_mask = inputs["attention_mask"].squeeze(0).to(device)
+        input_ids = inputs["input_ids"].squeeze(0).to(self.device)
+        attention_mask = inputs["attention_mask"].squeeze(0).to(self.device)
 
         # Apply random masking
         seq_length = input_ids.shape[0]
@@ -58,3 +62,15 @@ class MaskedTextDataset(Dataset):
         masked_input_ids[mask_indices] = self.tokenizer.mask_token_id  # Replace with [MASK] token
 
         return masked_input_ids, attention_mask, input_ids
+    
+
+class TrainerProgressCallback(TrainerCallback):
+    def __init__(self, total_steps, desc):
+        self.progress_bar = tqdm(total=total_steps, desc=desc, unit="batch")
+
+    def on_prediction_step(self, args, state, control, **kwargs):
+        self.progress_bar.update(1)
+
+    def on_predict_end(self, args, state, control, **kwargs):
+        self.progress_bar.close()
+    

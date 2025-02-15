@@ -62,3 +62,5 @@ logs/*
 model-variants/*
 *bk*
 *.pdf
+cc.my.300.bin
+cc.my.300.bin.gz

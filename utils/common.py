@@ -1,12 +1,101 @@
+import os
 import bert_score
 import torch
 import pandas as pd
+import tensorflow as tf
 from torch.utils.data import DataLoader
 from utils.custom_class import EvaluationDataset
 from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
 from rouge_score import rouge_scorer
 from sacrebleu import corpus_chrf
+from sacrebleu.metrics import CHRF
 from tqdm.notebook import tqdm
+from transformers import (
+    AutoTokenizer, AutoModelForSeq2SeqLM, AutoModelForMaskedLM, 
+    Trainer, TrainingArguments
+)
+from custom_class import TrainerProgressCallback
+
+# Function to generate masked predictions
+def generate_masked_predictions_batch(dataloader, model, tokenizer, device):
+    all_predictions = []
+
+    with torch.no_grad():
+        for batch in tqdm(dataloader, desc="Generating Masked Predictions"):
+            # Move batch data to GPU
+            masked_input_ids, attention_mask, _ = [x.to(device) for x in batch]
+
+            # Run model inference on GPU
+            outputs = model(input_ids=masked_input_ids, attention_mask=attention_mask)
+
+            # Replace masked tokens with predicted tokens
+            predicted_tokens_batch = masked_input_ids.clone()
+            for i in range(masked_input_ids.shape[0]):  # Loop over batch
+                mask_positions = (masked_input_ids[i] == tokenizer.mask_token_id).nonzero(as_tuple=True)[0]
+                for pos in mask_positions:
+                    predicted_token_id = torch.argmax(outputs.logits[i, pos], dim=-1).item()
+                    predicted_tokens_batch[i, pos] = predicted_token_id
+
+            # Decode predictions
+            batch_predictions = tokenizer.batch_decode(predicted_tokens_batch.cpu(), skip_special_tokens=True)
+            all_predictions.extend(batch_predictions)
+
+    return all_predictions
+
+# Function to generate masked predictions using Hugging Face Dataset
+def generate_masked_predictions_hf(dataset, model, tokenizer, device):
+    def predict_fn(example):
+        masked_input_ids = torch.tensor(example["input_ids"]).unsqueeze(0).to(device)
+        attention_mask = torch.tensor(example["attention_mask"]).unsqueeze(0).to(device)
+
+        # Model inference
+        with torch.no_grad():
+            outputs = model(input_ids=masked_input_ids, attention_mask=attention_mask)
+
+        # Replace masked tokens with predicted tokens
+        predicted_tokens = masked_input_ids.clone()
+        mask_positions = (masked_input_ids == tokenizer.mask_token_id).nonzero(as_tuple=True)[1]
+        for pos in mask_positions:
+            predicted_token_id = torch.argmax(outputs.logits[0, pos], dim=-1).item()
+            predicted_tokens[0, pos] = predicted_token_id
+
+        example["generated"] = tokenizer.decode(predicted_tokens[0], skip_special_tokens=True)
+        return example
+
+    # Apply prediction function to dataset
+    dataset = dataset.map(predict_fn, batched=False, num_proc=4)
+    return dataset
+
+# function to generate predictions for mt5
+def generate_mt5_predictions(dataset, model, tokenizer, device):
+    # Move to gpu
+    model.to(device)
+
+    training_args = TrainingArguments(
+        per_device_train_batch_size=8,
+        gradient_accumulation_steps=8,
+        fp16= False,
+        bf16= True,
+        auto_find_batch_size=True,
+    )
+
+    # Load Trainer and Data
+    trainer = Trainer(model=model, args=training_args)
+    total_batches = len(trainer.get_eval_dataloader(dataset))
+
+    # Add Progress Callback
+    trainer.add_callback(TrainerProgressCallback(total_batches))
+
+    # Run Predictions
+    outputs = trainer.predict(dataset)
+
+    # Decode Predictions Efficiently
+    generated_texts = tokenizer.batch_decode(outputs.predictions, skip_special_tokens=True, batch_size=16)
+
+    # Add Predictions to Dataset
+    dataset = dataset.add_column("generated", generated_texts)
+
+    return dataset
 
 # function to compute metrics
 def compute_metrics_batch(dataset, referenceColName, device, batch_size=32):
@@ -49,54 +138,44 @@ def compute_metrics_batch(dataset, referenceColName, device, batch_size=32):
     dataset["chrf-s"] = all_chrfs
     dataset["bert_score"] = all_berts
 
-# Function to generate masked predictions
-def generate_masked_predictions_batch(dataloader, model, tokenizer, device):
-    all_predictions = []
+# Function to Compute Metrics using Hugging Face Dataset
+def compute_metrics_hf(dataset, device):
+    smooth_fn = SmoothingFunction().method1
+    rouge = rouge_scorer.RougeScorer(["rouge1", "rouge2", "rougeL"], use_stemmer=True)
+    chrf = CHRF()
 
-    with torch.no_grad():
-        for batch in tqdm(dataloader, desc="Generating Masked Predictions"):
-            # Move batch data to GPU
-            masked_input_ids, attention_mask, _ = [x.to(device) for x in batch]
+    def compute_metrics_batch(example):
+        predictions = example["generated"]
+        references = example["target"]
 
-            # Run model inference on GPU
-            outputs = model(input_ids=masked_input_ids, attention_mask=attention_mask)
+        # Compute BLEU Score
+        bleu_score = sentence_bleu([references.split()], predictions.split(), smoothing_function=smooth_fn)
 
-            # Replace masked tokens with predicted tokens
-            predicted_tokens_batch = masked_input_ids.clone()
-            for i in range(masked_input_ids.shape[0]):  # Loop over batch
-                mask_positions = (masked_input_ids[i] == tokenizer.mask_token_id).nonzero(as_tuple=True)[0]
-                for pos in mask_positions:
-                    predicted_token_id = torch.argmax(outputs.logits[i, pos], dim=-1).item()
-                    predicted_tokens_batch[i, pos] = predicted_token_id
+        # Compute ROUGE Scores
+        rouge_scores = rouge.score(predictions, references)
 
-            # Decode predictions
-            batch_predictions = tokenizer.batch_decode(predicted_tokens_batch.cpu(), skip_special_tokens=True)
-            all_predictions.extend(batch_predictions)
+        # Compute chrF-S Score
+        chrf_score = chrf.sentence_score(predictions, [references]).score
 
-    return all_predictions
+        # Compute BERTScore
+        bert_p, bert_r, bert_f1 = bert_score([predictions], [references], lang="my", device=device)
 
-# function to generate predictions
-def generate_mt5_predictions_batch(dataloader, model, tokenizer, spt_processor, device):
-    predictions = []
+        return {
+            "bleu": bleu_score,
+            "rouge-1": rouge_scores["rouge1"].fmeasure,
+            "rouge-2": rouge_scores["rouge2"].fmeasure,
+            "rouge-l": rouge_scores["rougeL"].fmeasure,
+            "chrf-s": chrf_score,
+            "bert_score": bert_f1.mean().item()
+        }
 
-    for batch in tqdm(dataloader, desc=f"Generating Predictions", unit="batch"):
-        # Apply spt
-        spt_encoded_batch = [" ".join(spt_processor.encode_as_pieces(text)) for text in batch]
-        
-        # Tokenize input
-        inputs = tokenizer(spt_encoded_batch, return_tensors="pt", padding=True, truncation=True).to(device)
+    # Apply batch-wise metric computation
+    dataset = dataset.map(compute_metrics_batch, batched=False, num_proc=4)
 
-        with torch.no_grad():
-            # Generate output sequence
-            output_tokens = model.generate(**inputs, max_length=128)
+    return dataset
 
-        # Decode generated sequences
-        decoded_output = [tokenizer.decode(tokens, skip_special_tokens=True) for tokens in output_tokens]
-        predictions.extend(decoded_output)
 
-    return predictions
-
- # Function to compute masked perplexity in batch
+# Function to compute masked perplexity in batch
 def compute_multilingual_masked_perplexity_batch(dataloader, model, tokenizer, device):
     perplexities = []
 
@@ -139,29 +218,69 @@ def compute_multilingual_masked_perplexity_batch(dataloader, model, tokenizer, d
 
     return perplexities
 
-def compute_multilingual_mt5_perplexity_batch(dataloader, model, tokenizer, spt_processor, device):
-    predictions = []
+# Function to compute masked perplexity for a single
+def compute_multilingual_masked_perplexity_single(text, model, tokenizer, device):
+    # Tokenize text
+    inputs = tokenizer(text, return_tensors="pt", padding=True, truncation=True).to(device)
 
-    model.to(device)  # Move model to GPU
-    model = torch.compile(model)
-    model.eval()  # Set model to evaluation mode
+    with torch.no_grad():
+        outputs = model(**inputs)  # Forward pass
+        logits = outputs.logits
 
-    for batch in tqdm(dataloader, desc=f"Generating Predictions", unit="batch"):
-        # Apply spt
-        spt_encoded_batch = [" ".join(spt_processor.encode_as_pieces(text)) for text in batch]
-        
-        # Tokenize input
-        inputs = tokenizer(spt_encoded_batch, return_tensors="pt", padding=True, truncation=True).to(device)
+    temperature = 1.5
+    logits = logits / temperature
 
-        with torch.no_grad():
-            # Generate output sequence
-            output_tokens = model.generate(**inputs, max_length=128)
+    # Compute log probabilities
+    log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
 
-        # Decode generated sequences
-        decoded_output = [tokenizer.decode(tokens, skip_special_tokens=True) for tokens in output_tokens]
-        predictions.extend(decoded_output)
+    # Get token log-likelihoods using true token IDs
+    target_ids = inputs["input_ids"]
+    log_likelihood = log_probs.gather(dim=-1, index=target_ids.unsqueeze(-1)).squeeze(-1)
 
-    return predictions
+    # Apply attention mask to remove padding tokens
+    mask = inputs["attention_mask"]
+    masked_log_likelihood = log_likelihood * mask  # Zero out padding contributions
+
+    # Compute sentence-level mean log-likelihood
+    sentence_log_likelihood = masked_log_likelihood.sum(dim=1) / mask.sum(dim=1)
+
+    # Convert log-likelihood to perplexity
+    log_perplexity = -sentence_log_likelihood
+    perplexity_score = torch.exp(log_perplexity).cpu().numpy()[0]
+
+    return perplexity_score
+
+# Function to compute mT5 perplexity for a single example
+def compute_multilingual_mt5_perplexity_single(text, model, tokenizer, device):
+    # Tokenize text
+    inputs = tokenizer(text, return_tensors="pt", padding=True, truncation=True).to(device)
+
+    with torch.no_grad():
+        outputs = model(**inputs)  # Forward pass
+        logits = outputs.logits
+
+    temperature = 1.5
+    logits = logits / temperature
+
+    # Compute log probabilities
+    log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
+
+    # Get token log-likelihoods using true token IDs
+    target_ids = inputs["input_ids"]
+    log_likelihood = log_probs.gather(dim=-1, index=target_ids.unsqueeze(-1)).squeeze(-1)
+
+    # Apply attention mask to remove padding tokens
+    mask = inputs["attention_mask"]
+    masked_log_likelihood = log_likelihood * mask  # Zero out padding contributions
+
+    # Compute sentence-level mean log-likelihood
+    sentence_log_likelihood = masked_log_likelihood.sum(dim=1) / mask.sum(dim=1)
+
+    # Convert log-likelihood to perplexity
+    log_perplexity = -sentence_log_likelihood
+    perplexity_score = torch.exp(log_perplexity).cpu().numpy()[0]
+
+    return perplexity_score
 
 # function to create mean scores dataset
 def convert_to_mean_scores_df(datasets):
@@ -183,3 +302,74 @@ def convert_to_mean_scores_df(datasets):
     benchmarking_mean_scores_df = pd.DataFrame.from_dict(benchmarking_mean_scores, orient='index')
 
     return benchmarking_mean_scores_df
+
+# function to get fine tuned model
+def get_fine_tuned_model(model_name, spt_name, device):
+    model_path = f"model-variants/models/{model_name}_{spt_name.upper()}"
+
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    if "t5" in model_name.lower():
+        model = AutoModelForSeq2SeqLM.from_pretrained().to(device)
+    else:
+        model = AutoModelForMaskedLM.from_pretrained().to(device)
+
+    return model, tokenizer
+
+# function to get embeddings fine tuned model
+def get_embedded_fine_tuned_model(model_name, spt_name, device):
+    model_path = f"model-variants/models/Embedded_{model_name}_{spt_name.upper()}"
+
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    if "t5" in model_name.lower():
+        model = AutoModelForSeq2SeqLM.from_pretrained().to(device)
+    else:
+        model = AutoModelForMaskedLM.from_pretrained().to(device)
+
+    return model, tokenizer
+
+# function to get distilled fine tuned model
+def get_distilled_fine_tuned_model(model_name, spt_name, distill_model_name, device):
+    model_path = f"model-variants/models/Distilled_{model_name}_{spt_name.upper()}_{distill_model_name}"
+
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    if "t5" in model_name.lower():
+        model = AutoModelForSeq2SeqLM.from_pretrained().to(device)
+    else:
+        model = AutoModelForMaskedLM.from_pretrained().to(device)
+
+    return model, tokenizer
+
+# function to extract training and evaluation metrics from TensorBoard event logs.
+def extract_metrics_from_logs(name):
+    log_dir = f"logs/{name}"
+    metrics_dict = {"epoch": [], "train_loss": [], "eval_loss": [], "samples_per_sec": [], "steps_per_sec": []}
+
+    # Locate event files
+    event_files = [os.path.join(log_dir, f) for f in os.listdir(log_dir) if "tfevents" in f]
+    
+    for event_file in event_files:
+        for summary in tf.compat.v1.train.summary_iterator(event_file):
+            for v in summary.summary.value:
+                if v.tag == "train/loss":
+                    metrics_dict["epoch"].append(summary.step)
+                    metrics_dict["train_loss"].append(v.simple_value)
+                elif v.tag == "eval/loss":
+                    metrics_dict["eval_loss"].append(v.simple_value)
+                elif v.tag == "eval/samples_per_second":
+                    metrics_dict["samples_per_sec"].append(v.simple_value)
+                elif v.tag == "eval/steps_per_second":
+                    metrics_dict["steps_per_sec"].append(v.simple_value)
+
+    return pd.DataFrame(metrics_dict).sort_values("epoch")
+
+# function to compute the size of a PyTorch model in megabytes (MB).
+def get_model_size(model_name):
+    model_name = f"model-variants/models/{model_name}"
+
+    model = torch.load(os.path.join(model_name, "pytorch_model.bin"), map_location="cpu")
+
+    param_size = sum(p.numel() * p.element_size() for p in model.parameters())  # Size of parameters
+    buffer_size = sum(b.numel() * b.element_size() for b in model.buffers())  # Size of buffers
+    total_size = (param_size + buffer_size) / (1024 ** 2)  # Convert to MB
+
+    return round(total_size, 2)
