@@ -72,28 +72,40 @@ def save_model_variants_df(df, df_name):
     """
     function to save model-variants df
     """
-    df.to_csv(f"model-variants/{df_name}.csv", index=False, encoding="utf-8")
+    df.to_csv(f"model-variants/data/{df_name}.csv", index=False, encoding="utf-8")
+
+def save_model_variants_gen_df(df, df_name):
+    """
+    function to save model-variants df
+    """
+    df.to_csv(f"model-variants/gen/{df_name}.csv", index=False, encoding="utf-8")
 
 def save_model_variants_hf(df, df_name): 
     """
     function to save model-variants df in arrow format
     """
-    df.save_to_disk(f"model-variants/{df_name}_hf_dataset")
+    df.save_to_disk(f"model-variants/data/{df_name}_hf_dataset")
 
 def load_model_variants_df(df_name):
     """
     function to load model-variants df
     """
-    return pd.read_csv(f"model-variants/{df_name}.csv", header=0, encoding="utf-8")
+    return pd.read_csv(f"model-variants/data/{df_name}.csv", header=0, encoding="utf-8")
+
+def load_model_variants_gen_df(df_name):
+    """
+    function to load model-variants df
+    """
+    return pd.read_csv(f"model-variants/gen/{df_name}.csv", header=0, encoding="utf-8")
 
 def load_model_variants_hf(df_name):
     """
     function to load model-variants df with arrow
     """
-    return load_from_disk(f"model-variants/{df_name}_hf_dataset")
+    return load_from_disk(f"model-variants/data/{df_name}_hf_dataset")
 
 def convert_to_hf(dataset):
     """
     function to convert to huggingface dataset
     """
-    return Dataset.from_pandas(dataset)
+    return Dataset.from_pandas(dataset.reset_index(drop=True))

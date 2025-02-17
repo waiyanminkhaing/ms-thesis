@@ -1,20 +1,24 @@
 import os
+import warnings
 import bert_score
 import torch
 import pandas as pd
 import tensorflow as tf
 from torch.utils.data import DataLoader
-from utils.custom_class import EvaluationDataset
+from utils.custom_class import EvaluationDataset, TrainerProgressCallback
 from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
 from rouge_score import rouge_scorer
 from sacrebleu import corpus_chrf
 from sacrebleu.metrics import CHRF
 from tqdm.notebook import tqdm
 from transformers import (
-    AutoTokenizer, AutoModelForSeq2SeqLM, AutoModelForMaskedLM, 
-    Trainer, TrainingArguments
+    AutoTokenizer, AutoModel, AutoModelForMaskedLM,
+    Trainer, TrainingArguments,
 )
-from custom_class import TrainerProgressCallback
+from peft import PeftModel, PeftConfig
+
+# Suppress specific UserWarnings
+warnings.filterwarnings("ignore", category=UserWarning, module="peft.peft_model")
 
 # Function to generate masked predictions
 def generate_masked_predictions_batch(dataloader, model, tokenizer, device):
@@ -45,25 +49,36 @@ def generate_masked_predictions_batch(dataloader, model, tokenizer, device):
 # Function to generate masked predictions using Hugging Face Dataset
 def generate_masked_predictions_hf(dataset, model, tokenizer, device):
     def predict_fn(example):
-        masked_input_ids = torch.tensor(example["input_ids"]).unsqueeze(0).to(device)
-        attention_mask = torch.tensor(example["attention_mask"]).unsqueeze(0).to(device)
+        input = tokenizer(
+            example["burmese"],
+            padding="max_length",
+            truncation=True,
+            max_length=512
+        )
+
+        masked_input_ids = torch.tensor(input["input_ids"]).unsqueeze(0).to(device)
+        attention_mask = torch.tensor(input["attention_mask"]).unsqueeze(0).to(device)
 
         # Model inference
         with torch.no_grad():
             outputs = model(input_ids=masked_input_ids, attention_mask=attention_mask)
 
-        # Replace masked tokens with predicted tokens
-        predicted_tokens = masked_input_ids.clone()
+        logits = outputs.logits
         mask_positions = (masked_input_ids == tokenizer.mask_token_id).nonzero(as_tuple=True)[1]
+
+        # Replace masked tokens with the most probable prediction
+        predicted_tokens = masked_input_ids.clone()
         for pos in mask_positions:
-            predicted_token_id = torch.argmax(outputs.logits[0, pos], dim=-1).item()
+            predicted_token_id = torch.argmax(logits[0, pos], dim=-1).item()
             predicted_tokens[0, pos] = predicted_token_id
 
-        example["generated"] = tokenizer.decode(predicted_tokens[0], skip_special_tokens=True)
+        # Decode and ensure Burmese text is output
+        generated_text = tokenizer.decode(predicted_tokens[0], skip_special_tokens=True)
+        example["generated"] = generated_text
+
         return example
 
-    # Apply prediction function to dataset
-    dataset = dataset.map(predict_fn, batched=False, num_proc=4)
+    dataset = dataset.map(predict_fn, batched=False)
     return dataset
 
 # function to generate predictions for mt5
@@ -303,15 +318,53 @@ def convert_to_mean_scores_df(datasets):
 
     return benchmarking_mean_scores_df
 
-# function to get fine tuned model
-def get_fine_tuned_model(model_name, spt_name, device):
-    model_path = f"model-variants/models/{model_name}_{spt_name.upper()}"
+# Function to merge fine-tuned model
+def merge_fine_tuned_model(base_model_name, adapter_model_name):
+    adapter_path = f"model-variants/models/{adapter_model_name}"
 
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
-    if "t5" in model_name.lower():
-        model = AutoModelForSeq2SeqLM.from_pretrained().to(device)
-    else:
-        model = AutoModelForMaskedLM.from_pretrained().to(device)
+    # Load the base model (needed for LoRA)
+    base_model = AutoModel.from_pretrained(base_model_name)
+
+    # Load the LoRA adapter configuration
+    config = PeftConfig.from_pretrained(adapter_path)
+    print(f"🔍 LoRA Configuration:\n{config}")
+
+    # Load the LoRA adapter
+    model = PeftModel.from_pretrained(base_model, adapter_path, is_trainable=True)
+
+    # Check LoRA layers before merging
+    lora_keys = [name for name, _ in model.named_parameters() if "lora" in name]
+    print(f"LoRA Adapter Keys Found: {len(lora_keys)} layers")
+    
+    if not lora_keys:
+        print("⚠️ No LoRA layers found! Ensure the adapter was properly trained and saved.")
+        return
+
+    # Now, Merge LoRA into base model
+    merged_model = model.merge_and_unload()
+
+    # Save full merged model
+    full_model_path = f"{adapter_path}_full"
+    merged_model.save_pretrained(full_model_path)
+
+    # Save tokenizer
+    tokenizer = AutoTokenizer.from_pretrained(adapter_path)
+    tokenizer.save_pretrained(full_model_path)
+
+    print(f"Merged model saved at: {full_model_path}")
+
+
+# function to get fine tuned model
+def get_fine_tuned_model(model_name, spt_name, base_model_name, device):
+    # load base model
+    model = AutoModelForMaskedLM.from_pretrained(base_model_name)
+
+    # Load LoRA Weights
+    lora_checkpoint_path = f"model-variants/models/{model_name}_{spt_name.upper()}"
+    model = PeftModel.from_pretrained(model, lora_checkpoint_path)
+
+    # Load Tokenizer
+    tokenizer = AutoTokenizer.from_pretrained(lora_checkpoint_path)
 
     return model, tokenizer
 
@@ -320,10 +373,7 @@ def get_embedded_fine_tuned_model(model_name, spt_name, device):
     model_path = f"model-variants/models/Embedded_{model_name}_{spt_name.upper()}"
 
     tokenizer = AutoTokenizer.from_pretrained(model_path)
-    if "t5" in model_name.lower():
-        model = AutoModelForSeq2SeqLM.from_pretrained().to(device)
-    else:
-        model = AutoModelForMaskedLM.from_pretrained().to(device)
+    model = AutoModel.from_pretrained(model_path).to(device)
 
     return model, tokenizer
 
@@ -332,10 +382,7 @@ def get_distilled_fine_tuned_model(model_name, spt_name, distill_model_name, dev
     model_path = f"model-variants/models/Distilled_{model_name}_{spt_name.upper()}_{distill_model_name}"
 
     tokenizer = AutoTokenizer.from_pretrained(model_path)
-    if "t5" in model_name.lower():
-        model = AutoModelForSeq2SeqLM.from_pretrained().to(device)
-    else:
-        model = AutoModelForMaskedLM.from_pretrained().to(device)
+    model = AutoModel.from_pretrained(model_path).to(device)
 
     return model, tokenizer
 
