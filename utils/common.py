@@ -15,7 +15,7 @@ from transformers import (
     AutoTokenizer, AutoModel, AutoModelForMaskedLM,
     Trainer, TrainingArguments,
 )
-from peft import PeftModel, PeftConfig
+from peft import PeftModel
 
 # Suppress specific UserWarnings
 warnings.filterwarnings("ignore", category=UserWarning, module="peft.peft_model")
@@ -318,96 +318,75 @@ def convert_to_mean_scores_df(datasets):
 
     return benchmarking_mean_scores_df
 
-# Function to merge fine-tuned model
-def merge_fine_tuned_model(base_model_name, adapter_model_name):
-    adapter_path = f"model-variants/models/{adapter_model_name}"
-
-    # Load the base model (needed for LoRA)
-    base_model = AutoModel.from_pretrained(base_model_name)
-
-    # Load the LoRA adapter configuration
-    config = PeftConfig.from_pretrained(adapter_path)
-    print(f"🔍 LoRA Configuration:\n{config}")
-
-    # Load the LoRA adapter
-    model = PeftModel.from_pretrained(base_model, adapter_path, is_trainable=True)
-
-    # Check LoRA layers before merging
-    lora_keys = [name for name, _ in model.named_parameters() if "lora" in name]
-    print(f"LoRA Adapter Keys Found: {len(lora_keys)} layers")
-    
-    if not lora_keys:
-        print("⚠️ No LoRA layers found! Ensure the adapter was properly trained and saved.")
-        return
-
-    # Now, Merge LoRA into base model
-    merged_model = model.merge_and_unload()
-
-    # Save full merged model
-    full_model_path = f"{adapter_path}_full"
-    merged_model.save_pretrained(full_model_path)
-
-    # Save tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(adapter_path)
-    tokenizer.save_pretrained(full_model_path)
-
-    print(f"Merged model saved at: {full_model_path}")
-
-
-# function to get fine tuned model
-def get_fine_tuned_model(model_name, spt_name, base_model_name, device):
+def get_fine_tuned_model_from_path(path, base_model_name, device):
     # load base model
     model = AutoModelForMaskedLM.from_pretrained(base_model_name)
 
     # Load LoRA Weights
-    lora_checkpoint_path = f"model-variants/models/{model_name}_{spt_name.upper()}"
-    model = PeftModel.from_pretrained(model, lora_checkpoint_path)
+    model = PeftModel.from_pretrained(model, path)
+
+    # move to GPU
+    model = model.to(device)
 
     # Load Tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(lora_checkpoint_path)
+    tokenizer = AutoTokenizer.from_pretrained(path)
 
     return model, tokenizer
+
+
+# function to get fine tuned model
+def get_fine_tuned_model(model_name, spt_name, base_model_name, device):
+    path = f"model-variants/models/{model_name}_{spt_name.upper()}"
+
+    return get_fine_tuned_model_from_path(path, base_model_name, device)
 
 # function to get embeddings fine tuned model
-def get_embedded_fine_tuned_model(model_name, spt_name, device):
+def get_embedded_fine_tuned_model(model_name, spt_name, base_model_name, device):
     model_path = f"model-variants/models/Embedded_{model_name}_{spt_name.upper()}"
 
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
-    model = AutoModel.from_pretrained(model_path).to(device)
+    return get_fine_tuned_model_from_path(model_path, base_model_name, device)
 
-    return model, tokenizer
+# Function to Find the Latest `events.out.tfevents.*` File
+def get_latest_event_file(log_dir):
+    """
+    Finds the latest TensorFlow log event file in the specified directory.
+    """
+    event_files = [os.path.join(log_dir, f) for f in os.listdir(log_dir) if "events.out.tfevents" in f]
+    if not event_files:
+        raise FileNotFoundError("No TensorFlow event files found in the directory.")
 
-# function to get distilled fine tuned model
-def get_distilled_fine_tuned_model(model_name, spt_name, distill_model_name, device):
-    model_path = f"model-variants/models/Distilled_{model_name}_{spt_name.upper()}_{distill_model_name}"
+    # Get the latest event file based on modification time
+    latest_event_file = max(event_files, key=os.path.getmtime)
+    print(f"Latest TensorFlow Event File: {latest_event_file}")
+    return latest_event_file
 
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
-    model = AutoModel.from_pretrained(model_path).to(device)
+# Function to Extract Extended Training Metrics (Includes Accuracy & Learning Rate)
+def extract_extended_metrics_from_logs(model_name):
+    """
+    Extracts extended training metrics from TensorFlow log event files:
+    - epoch
+    - train_loss
+    - eval_loss
+    - accuracy
+    - learning_rate
+    - samples_per_sec
+    - steps_per_sec
+    """
+    log_dir = f"model-variants/logs/{model_name}"
+    event_file = get_latest_event_file(log_dir)
 
-    return model, tokenizer
-
-# function to extract training and evaluation metrics from TensorBoard event logs.
-def extract_metrics_from_logs(name):
-    log_dir = f"logs/{name}"
-    metrics_dict = {"epoch": [], "train_loss": [], "eval_loss": [], "samples_per_sec": [], "steps_per_sec": []}
-
-    # Locate event files
-    event_files = [os.path.join(log_dir, f) for f in os.listdir(log_dir) if "tfevents" in f]
+    metrics = {"epoch": [], "train_loss": [], "eval_loss": [], "accuracy": [], "learning_rate": [], "samples_per_sec": [], "steps_per_sec": []}
     
-    for event_file in event_files:
-        for summary in tf.compat.v1.train.summary_iterator(event_file):
-            for v in summary.summary.value:
-                if v.tag == "train/loss":
-                    metrics_dict["epoch"].append(summary.step)
-                    metrics_dict["train_loss"].append(v.simple_value)
-                elif v.tag == "eval/loss":
-                    metrics_dict["eval_loss"].append(v.simple_value)
-                elif v.tag == "eval/samples_per_second":
-                    metrics_dict["samples_per_sec"].append(v.simple_value)
-                elif v.tag == "eval/steps_per_second":
-                    metrics_dict["steps_per_sec"].append(v.simple_value)
+    for event in tf.compat.v1.train.summary_iterator(event_file):
+        for value in event.summary.value:
+            tag = value.tag.lower()  # Convert to lowercase to match dictionary keys
+            if tag in metrics:
+                metrics[tag].append(value.simple_value)
+        
+        if event.step not in metrics["epoch"]:
+            metrics["epoch"].append(event.step)
 
-    return pd.DataFrame(metrics_dict).sort_values("epoch")
+    return pd.DataFrame(metrics)
 
 # function to compute the size of a PyTorch model in megabytes (MB).
 def get_model_size(model_name):

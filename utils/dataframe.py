@@ -1,6 +1,7 @@
+import os
 import pandas as pd
 import ast
-from datasets import load_from_disk, Dataset
+from datasets import load_from_disk, Dataset, concatenate_datasets
 
 def save_gen_df(df, df_name):
     """
@@ -80,11 +81,26 @@ def save_model_variants_gen_df(df, df_name):
     """
     df.to_csv(f"model-variants/gen/{df_name}.csv", index=False, encoding="utf-8")
 
-def save_model_variants_hf(df, df_name): 
+def save_model_variants_hf(df, df_name, num_chunks=1): 
     """
-    function to save model-variants df in arrow format
+    Function to save model-variants df in arrow format
     """
-    df.save_to_disk(f"model-variants/data/{df_name}_hf_dataset")
+    output_dir = f"model-variants/data/{df_name}_hf_dataset"
+
+    if num_chunks > 1:
+        os.makedirs(output_dir, exist_ok=True)
+
+        chunk_size = len(df) // num_chunks  # Compute chunk size dynamically
+        remainder = len(df) % num_chunks  # Handle remaining samples
+
+        start = 0
+        for i in range(num_chunks):
+            end = start + chunk_size + (1 if i < remainder else 0)  # Distribute remainder
+            chunk = df.select(range(start, end))
+            chunk.save_to_disk(f"{output_dir}/chunk_{i}")
+            start = end  # Move to next chunk
+    else:
+        df.save_to_disk(output_dir)
 
 def load_model_variants_df(df_name):
     """
@@ -100,9 +116,25 @@ def load_model_variants_gen_df(df_name):
 
 def load_model_variants_hf(df_name):
     """
-    function to load model-variants df with arrow
+    Function to load model-variants df, handling both chunked and non-chunked datasets.
     """
-    return load_from_disk(f"model-variants/data/{df_name}_hf_dataset")
+    # Define the directory where the dataset is stored
+    output_dir = f"model-variants/data/{df_name}_hf_dataset"
+
+    # Check if dataset is chunked or a single dataset
+    chunk_paths = sorted([
+        os.path.join(output_dir, d) for d in os.listdir(output_dir) if os.path.isdir(os.path.join(output_dir, d))
+    ])
+
+    if chunk_paths:
+        # If multiple subdirectories exist, assume dataset is chunked
+        chunks = [load_from_disk(chunk_path) for chunk_path in chunk_paths]
+        full_dataset = concatenate_datasets(chunks)
+    else:
+        # If no chunks are found, load as a single dataset
+        full_dataset = load_from_disk(output_dir)
+
+    return full_dataset
 
 def convert_to_hf(dataset):
     """
