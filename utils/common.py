@@ -46,39 +46,48 @@ def generate_masked_predictions_batch(dataloader, model, tokenizer, device):
 
     return all_predictions
 
-# Function to generate masked predictions using Hugging Face Dataset
-def generate_masked_predictions_hf(dataset, model, tokenizer, device):
-    def predict_fn(example):
-        input = tokenizer(
-            example["burmese"],
+def generate_masked_predictions_hf_batch(dataset, model, tokenizer, device, batch_size=16):
+    """
+    Optimized function to generate masked predictions using Hugging Face Dataset with batching.
+    """
+    
+    def predict_fn(batch):
+        inputs = tokenizer(
+            batch["burmese"],
             padding="max_length",
             truncation=True,
-            max_length=512
-        )
+            max_length=512,
+            return_tensors="pt"
+        ).to(device)
 
-        masked_input_ids = torch.tensor(input["input_ids"]).unsqueeze(0).to(device)
-        attention_mask = torch.tensor(input["attention_mask"]).unsqueeze(0).to(device)
+        masked_input_ids = inputs["input_ids"]
+        attention_mask = inputs["attention_mask"]
 
-        # Model inference
+        # Model inference in batch mode
         with torch.no_grad():
             outputs = model(input_ids=masked_input_ids, attention_mask=attention_mask)
 
         logits = outputs.logits
-        mask_positions = (masked_input_ids == tokenizer.mask_token_id).nonzero(as_tuple=True)[1]
 
-        # Replace masked tokens with the most probable prediction
+        # Identify mask token positions
+        mask_positions = (masked_input_ids == tokenizer.mask_token_id).nonzero(as_tuple=True)
+
+        # Replace masked tokens with predicted tokens
         predicted_tokens = masked_input_ids.clone()
-        for pos in mask_positions:
-            predicted_token_id = torch.argmax(logits[0, pos], dim=-1).item()
-            predicted_tokens[0, pos] = predicted_token_id
+        for i in range(mask_positions[0].size(0)):  # Iterate over batch
+            batch_idx, pos = mask_positions[0][i], mask_positions[1][i]
+            predicted_token_id = torch.argmax(logits[batch_idx, pos], dim=-1).item()
+            predicted_tokens[batch_idx, pos] = predicted_token_id
 
-        # Decode and ensure Burmese text is output
-        generated_text = tokenizer.decode(predicted_tokens[0], skip_special_tokens=True)
-        example["generated"] = generated_text
+        # Decode batch and add generated texts
+        generated_texts = tokenizer.batch_decode(predicted_tokens, skip_special_tokens=True)
 
-        return example
+        batch["generated"] = generated_texts
+        return batch
 
-    dataset = dataset.map(predict_fn, batched=False)
+    # Process dataset in batches
+    dataset = dataset.map(predict_fn, batched=True, batch_size=batch_size)
+
     return dataset
 
 # function to generate predictions for mt5
