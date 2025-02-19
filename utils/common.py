@@ -12,7 +12,7 @@ from sacrebleu import corpus_chrf
 from sacrebleu.metrics import CHRF
 from tqdm.notebook import tqdm
 from transformers import (
-    AutoTokenizer, AutoModel, AutoModelForMaskedLM,
+    AutoTokenizer, AutoModelForSeq2SeqLM, AutoModelForMaskedLM,
     Trainer, TrainingArguments,
 )
 from peft import PeftModel
@@ -46,39 +46,48 @@ def generate_masked_predictions_batch(dataloader, model, tokenizer, device):
 
     return all_predictions
 
-# Function to generate masked predictions using Hugging Face Dataset
-def generate_masked_predictions_hf(dataset, model, tokenizer, device):
-    def predict_fn(example):
-        input = tokenizer(
-            example["burmese"],
+def generate_masked_predictions_hf_batch(dataset, model, tokenizer, device, batch_size=16):
+    """
+    Optimized function to generate masked predictions using Hugging Face Dataset with batching.
+    """
+    
+    def predict_fn(batch):
+        inputs = tokenizer(
+            batch["burmese"],
             padding="max_length",
             truncation=True,
-            max_length=512
-        )
+            max_length=512,
+            return_tensors="pt"
+        ).to(device)
 
-        masked_input_ids = torch.tensor(input["input_ids"]).unsqueeze(0).to(device)
-        attention_mask = torch.tensor(input["attention_mask"]).unsqueeze(0).to(device)
+        masked_input_ids = inputs["input_ids"]
+        attention_mask = inputs["attention_mask"]
 
-        # Model inference
+        # Model inference in batch mode
         with torch.no_grad():
             outputs = model(input_ids=masked_input_ids, attention_mask=attention_mask)
 
         logits = outputs.logits
-        mask_positions = (masked_input_ids == tokenizer.mask_token_id).nonzero(as_tuple=True)[1]
 
-        # Replace masked tokens with the most probable prediction
+        # Identify mask token positions
+        mask_positions = (masked_input_ids == tokenizer.mask_token_id).nonzero(as_tuple=True)
+
+        # Replace masked tokens with predicted tokens
         predicted_tokens = masked_input_ids.clone()
-        for pos in mask_positions:
-            predicted_token_id = torch.argmax(logits[0, pos], dim=-1).item()
-            predicted_tokens[0, pos] = predicted_token_id
+        for i in range(mask_positions[0].size(0)):  # Iterate over batch
+            batch_idx, pos = mask_positions[0][i], mask_positions[1][i]
+            predicted_token_id = torch.argmax(logits[batch_idx, pos], dim=-1).item()
+            predicted_tokens[batch_idx, pos] = predicted_token_id
 
-        # Decode and ensure Burmese text is output
-        generated_text = tokenizer.decode(predicted_tokens[0], skip_special_tokens=True)
-        example["generated"] = generated_text
+        # Decode batch and add generated texts
+        generated_texts = tokenizer.batch_decode(predicted_tokens, skip_special_tokens=True)
 
-        return example
+        batch["generated"] = generated_texts
+        return batch
 
-    dataset = dataset.map(predict_fn, batched=False)
+    # Process dataset in batches
+    dataset = dataset.map(predict_fn, batched=True, batch_size=batch_size)
+
     return dataset
 
 # function to generate predictions for mt5
@@ -233,17 +242,16 @@ def compute_multilingual_masked_perplexity_batch(dataloader, model, tokenizer, d
 
     return perplexities
 
-# Function to compute masked perplexity for a single
-def compute_multilingual_masked_perplexity_single(text, model, tokenizer, device):
-    # Tokenize text
-    inputs = tokenizer(text, return_tensors="pt", padding=True, truncation=True).to(device)
+def compute_multilingual_masked_perplexity_batch(texts, model, tokenizer, device):
+    """
+    Computes perplexity for a batch of text using a masked language model.
+    """
+    # Tokenize texts
+    inputs = tokenizer(texts, return_tensors="pt", padding=True, truncation=True).to(device)
 
     with torch.no_grad():
         outputs = model(**inputs)  # Forward pass
-        logits = outputs.logits
-
-    temperature = 1.5
-    logits = logits / temperature
+        logits = outputs.logits / 1.5  # Temperature scaling
 
     # Compute log probabilities
     log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
@@ -252,30 +260,29 @@ def compute_multilingual_masked_perplexity_single(text, model, tokenizer, device
     target_ids = inputs["input_ids"]
     log_likelihood = log_probs.gather(dim=-1, index=target_ids.unsqueeze(-1)).squeeze(-1)
 
-    # Apply attention mask to remove padding tokens
+    # Apply attention mask to remove padding contributions
     mask = inputs["attention_mask"]
-    masked_log_likelihood = log_likelihood * mask  # Zero out padding contributions
+    masked_log_likelihood = log_likelihood * mask  # Zero out padding tokens
 
     # Compute sentence-level mean log-likelihood
     sentence_log_likelihood = masked_log_likelihood.sum(dim=1) / mask.sum(dim=1)
 
     # Convert log-likelihood to perplexity
     log_perplexity = -sentence_log_likelihood
-    perplexity_score = torch.exp(log_perplexity).cpu().numpy()[0]
+    perplexity_scores = torch.exp(log_perplexity).cpu().numpy()
 
-    return perplexity_score
+    return perplexity_scores
 
-# Function to compute mT5 perplexity for a single example
-def compute_multilingual_mt5_perplexity_single(text, model, tokenizer, device):
-    # Tokenize text
-    inputs = tokenizer(text, return_tensors="pt", padding=True, truncation=True).to(device)
+def compute_multilingual_mt5_perplexity_batch(texts, model, tokenizer, device):
+    """
+    Computes perplexity for a batch of text using an mT5 model.
+    """
+    # Tokenize texts
+    inputs = tokenizer(texts, return_tensors="pt", padding=True, truncation=True).to(device)
 
     with torch.no_grad():
         outputs = model(**inputs)  # Forward pass
-        logits = outputs.logits
-
-    temperature = 1.5
-    logits = logits / temperature
+        logits = outputs.logits / 1.5  # Temperature scaling
 
     # Compute log probabilities
     log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
@@ -284,18 +291,19 @@ def compute_multilingual_mt5_perplexity_single(text, model, tokenizer, device):
     target_ids = inputs["input_ids"]
     log_likelihood = log_probs.gather(dim=-1, index=target_ids.unsqueeze(-1)).squeeze(-1)
 
-    # Apply attention mask to remove padding tokens
+    # Apply attention mask to remove padding contributions
     mask = inputs["attention_mask"]
-    masked_log_likelihood = log_likelihood * mask  # Zero out padding contributions
+    masked_log_likelihood = log_likelihood * mask  # Zero out padding tokens
 
     # Compute sentence-level mean log-likelihood
     sentence_log_likelihood = masked_log_likelihood.sum(dim=1) / mask.sum(dim=1)
 
     # Convert log-likelihood to perplexity
     log_perplexity = -sentence_log_likelihood
-    perplexity_score = torch.exp(log_perplexity).cpu().numpy()[0]
+    perplexity_scores = torch.exp(log_perplexity).cpu().numpy()
 
-    return perplexity_score
+    return perplexity_scores
+
 
 # function to create mean scores dataset
 def convert_to_mean_scores_df(datasets):
@@ -319,17 +327,19 @@ def convert_to_mean_scores_df(datasets):
     return benchmarking_mean_scores_df
 
 def get_fine_tuned_model_from_path(path, base_model_name, device):
-    # load base model
-    model = AutoModelForMaskedLM.from_pretrained(base_model_name)
+    # load base model and tokenizer
+    if "t5" in base_model_name.lower():
+        model = AutoModelForSeq2SeqLM.from_pretrained(base_model_name)
+        tokenizer = AutoTokenizer.from_pretrained(path, use_fast=False, legacy=True)
+    else:
+        model = AutoModelForMaskedLM.from_pretrained(base_model_name)
+        tokenizer = AutoTokenizer.from_pretrained(path)
 
     # Load LoRA Weights
     model = PeftModel.from_pretrained(model, path)
 
     # move to GPU
     model = model.to(device)
-
-    # Load Tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(path)
 
     return model, tokenizer
 
@@ -360,33 +370,49 @@ def get_latest_event_file(log_dir):
     print(f"Latest TensorFlow Event File: {latest_event_file}")
     return latest_event_file
 
-# Function to Extract Extended Training Metrics (Includes Accuracy & Learning Rate)
-def extract_extended_metrics_from_logs(model_name):
-    """
-    Extracts extended training metrics from TensorFlow log event files:
-    - epoch
-    - train_loss
-    - eval_loss
-    - accuracy
-    - learning_rate
-    - samples_per_sec
-    - steps_per_sec
-    """
+# Function to Extract Training Metrics (Includes Accuracy & Learning Rate)
+def extract_metrics_from_logs(model_name):
     log_dir = f"model-variants/logs/{model_name}"
     event_file = get_latest_event_file(log_dir)
 
-    metrics = {"epoch": [], "train_loss": [], "eval_loss": [], "accuracy": [], "learning_rate": [], "samples_per_sec": [], "steps_per_sec": []}
-    
-    for event in tf.compat.v1.train.summary_iterator(event_file):
-        for value in event.summary.value:
-            tag = value.tag.lower()  # Convert to lowercase to match dictionary keys
-            if tag in metrics:
-                metrics[tag].append(value.simple_value)
-        
-        if event.step not in metrics["epoch"]:
-            metrics["epoch"].append(event.step)
+    scalar = { "step": [], "metric": [], "value": [] }
+    for e in tf.compat.v1.train.summary_iterator(event_file):
+        for v in e.summary.value:
+            if v.HasField('simple_value'):  # Check if it's a scalar value
+                step = e.step
+                scalar["step"].append(step)
 
-    return pd.DataFrame(metrics)
+                metric_name = v.tag  # The name of the metric
+                scalar["metric"].append(metric_name)
+
+                value = v.simple_value
+                scalar["value"].append(value)
+
+    df = pd.DataFrame(scalar)
+
+    # Group by step and metric
+    grouped_df = df.pivot(index="step", columns="metric", values="value").reset_index()
+
+    column_mapping = {
+        "train/epoch": "train_epoch",
+        "train/grad_norm": "train_grad_norm",
+        "train/learning_rate": "train_learning_rate",
+        "train/loss": "train_loss",
+        "eval/loss": "eval_loss",
+        "eval/runtime": "eval_runtime",
+        "eval/samples_per_second": "eval_samples_per_second",
+        "eval/steps_per_second": "eval_steps_per_second",
+    }
+    
+    grouped_df = grouped_df.rename(columns=column_mapping)
+
+    train_df = grouped_df[["step", "train_epoch", "train_grad_norm", "train_learning_rate", "train_loss"]]
+    train_df = train_df.dropna()
+    
+    eval_df = grouped_df[["step", "eval_loss", "eval_runtime", "eval_samples_per_second", "eval_steps_per_second"]]
+    eval_df = eval_df.dropna()
+
+    return train_df, eval_df
 
 # function to compute the size of a PyTorch model in megabytes (MB).
 def get_model_size(model_name):
