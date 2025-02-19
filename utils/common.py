@@ -242,7 +242,7 @@ def compute_multilingual_masked_perplexity_batch(dataloader, model, tokenizer, d
 
     return perplexities
 
-def compute_multilingual_masked_perplexity_batch(texts, model, tokenizer, device):
+def compute_multilingual_masked_perplexity_hf_batch(texts, model, tokenizer, device):
     """
     Computes perplexity for a batch of text using a masked language model.
     """
@@ -251,7 +251,7 @@ def compute_multilingual_masked_perplexity_batch(texts, model, tokenizer, device
 
     with torch.no_grad():
         outputs = model(**inputs)  # Forward pass
-        logits = outputs.logits / 1.5  # Temperature scaling
+        logits = outputs.logits
 
     # Compute log probabilities
     log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
