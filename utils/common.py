@@ -163,38 +163,47 @@ def compute_metrics_batch(dataset, referenceColName, device, batch_size=32):
     dataset["bert_score"] = all_berts
 
 # Function to Compute Metrics using Hugging Face Dataset
-def compute_metrics_hf(dataset, device):
+def compute_metrics_hf_batch(dataset, device, batch_size = 16):
     smooth_fn = SmoothingFunction().method1
     rouge = rouge_scorer.RougeScorer(["rouge1", "rouge2", "rougeL"], use_stemmer=True)
     chrf = CHRF()
 
-    def compute_metrics_batch(example):
-        predictions = example["generated"]
-        references = example["target"]
+    def compute_metrics_batch(examples):
+        predictions = examples["generated"]
+        references = examples["target"]
 
         # Compute BLEU Score
-        bleu_score = sentence_bleu([references.split()], predictions.split(), smoothing_function=smooth_fn)
+        bleu_score = sentence_bleu(
+            [[ref.split()] for ref in references],  # Reference sentences as list of lists
+            [pred.split() for pred in predictions],  # Predicted sentences
+            smoothing_function=smooth_fn
+        )
 
         # Compute ROUGE Scores
-        rouge_scores = rouge.score(predictions, references)
+        rouge_results = [rouge.score(pred, ref) for pred, ref in zip(predictions, references)]
+        rouge_1 = sum(r["rouge1"].fmeasure for r in rouge_results) / len(rouge_results)
+        rouge_2 = sum(r["rouge2"].fmeasure for r in rouge_results) / len(rouge_results)
+        rouge_l = sum(r["rougeL"].fmeasure for r in rouge_results) / len(rouge_results)
 
         # Compute chrF-S Score
-        chrf_score = chrf.sentence_score(predictions, [references]).score
+        chrf_scores = [chrf.sentence_score(pred, [ref]).score for pred, ref in zip(predictions, references)]
+        chrf_avg = sum(chrf_scores) / len(chrf_scores)
 
         # Compute BERTScore
-        bert_p, bert_r, bert_f1 = bert_score([predictions], [references], lang="my", device=device)
+        bert_p, bert_r, bert_f1 = bert_score(predictions, references, lang="my", device=device)
+        bert_f1_avg = bert_f1.mean().item()
 
         return {
             "bleu": bleu_score,
-            "rouge-1": rouge_scores["rouge1"].fmeasure,
-            "rouge-2": rouge_scores["rouge2"].fmeasure,
-            "rouge-l": rouge_scores["rougeL"].fmeasure,
-            "chrf-s": chrf_score,
-            "bert_score": bert_f1.mean().item()
+            "rouge-1": rouge_1,
+            "rouge-2": rouge_2,
+            "rouge-l": rouge_l,
+            "chrf-s": chrf_avg,
+            "bert_score": bert_f1_avg
         }
 
     # Apply batch-wise metric computation
-    dataset = dataset.map(compute_metrics_batch, batched=False, num_proc=4)
+    dataset = dataset.map(compute_metrics_batch, batched=True, batch_size=batch_size)
 
     return dataset
 
