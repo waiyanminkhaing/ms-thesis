@@ -163,7 +163,7 @@ def compute_metrics_batch(dataset, referenceColName, device, batch_size=32):
     dataset["bert_score"] = all_berts
 
 # Function to Compute Metrics using Hugging Face Dataset with Batching
-def compute_metrics_hf_batch(dataset, device, batch_size=32):  # Added batch_size parameter
+def compute_metrics_hf_batch(dataset, device, batch_size=256):
     smooth_fn = SmoothingFunction().method1
     rouge = rouge_scorer.RougeScorer(["rouge1", "rouge2", "rougeL"], use_stemmer=True)
     chrf = CHRF()
@@ -172,6 +172,9 @@ def compute_metrics_hf_batch(dataset, device, batch_size=32):  # Added batch_siz
     def compute_metrics_batch(batch):
         predictions = batch["generated"]
         references = batch["burmese"]
+
+        predictions= [str(text) if text is not None else "" for text in predictions]
+        references= [str(text) if text is not None else "" for text in references]
 
         batch_size = len(predictions)
 
