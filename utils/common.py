@@ -398,7 +398,7 @@ def extract_metrics_from_logs(model_name):
     df = pd.DataFrame(scalar)
 
     # Group by step and metric
-    grouped_df = df.pivot(index="step", columns="metric", values="value").reset_index()
+    grouped_df = df.pivot_table(index="step", columns="metric", values="value", aggfunc="mean").reset_index()
 
     column_mapping = {
         "train/epoch": "train_epoch",
@@ -409,6 +409,11 @@ def extract_metrics_from_logs(model_name):
         "eval/runtime": "eval_runtime",
         "eval/samples_per_second": "eval_samples_per_second",
         "eval/steps_per_second": "eval_steps_per_second",
+        "train/total_flos": "final_total_flos",
+        "train/train_loss": "final_train_loss",
+        "train/train_runtime": "final_train_runtime",
+        "train/train_samples_per_second": "final_train_samples_per_second",
+        "train/train_steps_per_second": "final_train_steps_per_second"
     }
     
     grouped_df = grouped_df.rename(columns=column_mapping)
@@ -419,7 +424,10 @@ def extract_metrics_from_logs(model_name):
     eval_df = grouped_df[["step", "eval_loss", "eval_runtime", "eval_samples_per_second", "eval_steps_per_second"]]
     eval_df = eval_df.dropna()
 
-    return train_df, eval_df
+    final_df = grouped_df[["step", "final_total_flos", "final_train_loss", "final_train_runtime", "final_train_samples_per_second", "final_train_steps_per_second"]]
+    final_df = final_df.dropna()
+
+    return train_df, eval_df, final_df
 
 # function to compute the size of a PyTorch model in megabytes (MB).
 def get_model_size(model_name):
