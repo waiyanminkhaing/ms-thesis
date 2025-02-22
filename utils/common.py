@@ -5,7 +5,7 @@ import torch
 import pandas as pd
 import tensorflow as tf
 from torch.utils.data import DataLoader
-from utils.custom_class import EvaluationDataset, TrainerProgressCallback
+from utils.custom_class import EvaluationDataset
 from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
 from rouge_score import rouge_scorer
 from sacrebleu import corpus_chrf
@@ -13,9 +13,10 @@ from sacrebleu.metrics import CHRF
 from tqdm.notebook import tqdm
 from transformers import (
     AutoTokenizer, AutoModelForSeq2SeqLM, AutoModelForMaskedLM,
-    Trainer, TrainingArguments,
+    DataCollatorWithPadding,
 )
 from peft import PeftModel
+import matplotlib.pyplot as plt
 
 # Suppress specific UserWarnings
 warnings.filterwarnings("ignore", category=UserWarning, module="peft.peft_model")
@@ -90,36 +91,58 @@ def generate_masked_predictions_hf_batch(dataset, model, tokenizer, device, batc
 
     return dataset
 
-# function to generate predictions for mt5
-def generate_mt5_predictions(dataset, model, tokenizer, device):
-    # Move to gpu
-    model.to(device)
+# Function to Generate Predictions and Store in Dataset
+def generate_predictions_mT5_hf_batch(dataset, model, tokenizer, device, batch_size=16):
+    """
+    Generates batch predictions for mT5
+    """
+    # Tokenization Function
+    def tokenize_function(examples):
+        return tokenizer(
+            examples["english"],
+            padding="max_length",
+            truncation=True,
+            max_length=128,
+            return_tensors="pt"
+        )
 
-    training_args = TrainingArguments(
-        per_device_train_batch_size=8,
-        gradient_accumulation_steps=8,
-        fp16= False,
-        bf16= True,
-        auto_find_batch_size=True,
-    )
+    # Tokenize Dataset
+    tokenized_dataset = dataset.map(tokenize_function, batched=True, desc="Tokenizing")
 
-    # Load Trainer and Data
-    trainer = Trainer(model=model, args=training_args)
-    total_batches = len(trainer.get_eval_dataloader(dataset))
+    # ✅ Ensure Tokenized Data is in Correct Tensor Format
+    def format_to_tensors(examples):
+        return {
+            "input_ids": torch.tensor(examples["input_ids"], dtype=torch.long),
+            "attention_mask": torch.tensor(examples["attention_mask"], dtype=torch.long),
+        }
 
-    # Add Progress Callback
-    trainer.add_callback(TrainerProgressCallback(total_batches))
+    tokenized_dataset = tokenized_dataset.map(format_to_tensors, batched=True, desc="Formatting to tensors")
 
-    # Run Predictions
-    outputs = trainer.predict(dataset)
+    # Data Collator for Dynamic Padding
+    data_collator = DataCollatorWithPadding(tokenizer, return_tensors="pt")
 
-    # Decode Predictions Efficiently
-    generated_texts = tokenizer.batch_decode(outputs.predictions, skip_special_tokens=True, batch_size=16)
+    # Create DataLoader for GPU Processing
+    dataloader = torch.utils.data.DataLoader(tokenized_dataset, batch_size=batch_size, collate_fn=data_collator)
 
-    # Add Predictions to Dataset
-    dataset = dataset.add_column("generated", generated_texts)
+    predictions = []
+
+    # Run Inference in Batches on GPU
+    for batch in dataloader:
+        batch = {k: v.to(device) for k, v in batch.items()}  # Move batch to GPU
+
+        with torch.no_grad():
+            output_tokens = model.generate(**batch, max_length=128, num_beams=5, early_stopping=True)
+
+        # Decode Predictions
+        batch_predictions = tokenizer.batch_decode(output_tokens, skip_special_tokens=True)
+        predictions.extend(batch_predictions)
+
+    # Add Predictions as a Column in the Dataset
+    dataset = dataset.add_column("generated", predictions)
+    dataset = dataset[["english", "burmese", "generated"]]
 
     return dataset
+
 
 # function to compute metrics
 def compute_metrics_batch(dataset, referenceColName, device, batch_size=32):
@@ -317,6 +340,7 @@ def convert_to_mean_scores_df(datasets):
     # Compute mean scores dynamically using a dictionary comprehension
     benchmarking_mean_scores = {
         model: {
+            "name": model,
             "BLEU": dataset["bleu"].mean(),
             "ROUGE-1": dataset["rouge-1"].mean(),
             "ROUGE-2": dataset["rouge-2"].mean(),
@@ -440,3 +464,52 @@ def get_model_size(model_name):
     total_size = (param_size + buffer_size) / (1024 ** 2)  # Convert to MB
 
     return round(total_size, 2)
+
+# Function to plot training metrics
+def plot_training_metrics(train_df, model_name):
+    plt.figure(figsize=(6, 4))
+    plt.plot(train_df["step"], train_df["train_loss"], label="Train Loss", marker='o')
+    plt.xlabel("Step")
+    plt.ylabel("Loss")
+    plt.title(f"Training Loss Trend for {model_name}")
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
+    plt.figure(figsize=(6, 4))
+    plt.plot(train_df["step"], train_df["train_learning_rate"], label="Learning Rate", marker='o', color='orange')
+    plt.xlabel("Step")
+    plt.ylabel("Learning Rate")
+    plt.title(f"Learning Rate Trend for {model_name}")
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
+    plt.figure(figsize=(6, 4))
+    plt.plot(train_df["step"], train_df["train_grad_norm"], label="Gradient Norm", marker='o', color='green')
+    plt.xlabel("Step")
+    plt.ylabel("Gradient Norm")
+    plt.title(f"Gradient Norm Trend for {model_name}")
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
+# Function to plot evaluation metrics with smaller size
+def plot_evaluation_metrics(eval_df, model_name):
+    plt.figure(figsize=(6, 4))
+    plt.plot(eval_df["step"], eval_df["eval_loss"], label="Eval Loss", marker='o', markersize=3, color='red')
+    plt.xlabel("Step")
+    plt.ylabel("Loss")
+    plt.title(f"Evaluation Loss for {model_name}")
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
+    plt.figure(figsize=(6, 4))
+    plt.plot(eval_df["step"], eval_df["eval_runtime"], label="Eval Runtime", marker='o', markersize=3, color='purple')
+    plt.xlabel("Step")
+    plt.ylabel("Runtime (seconds)")
+    plt.title(f"Evaluation Runtime for {model_name}")
+    plt.legend()
+    plt.grid(True)
+    plt.show()

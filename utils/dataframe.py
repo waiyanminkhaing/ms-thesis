@@ -1,6 +1,10 @@
 import os
+import shutil
+import tempfile
+import time
 import pandas as pd
 import ast
+import re
 from datasets import load_from_disk, Dataset, concatenate_datasets
 
 def save_gen_df(df, df_name):
@@ -102,6 +106,23 @@ def save_model_variants_hf(df, df_name, num_chunks=1):
     else:
         df.save_to_disk(output_dir)
 
+def save_model_variants_chunk_hf(df, df_name, chunk_num): 
+    """
+    Function to save model-variants df in arrow format
+    """
+    output_dir = f"model-variants/data/{df_name}_hf_dataset/chunk_{chunk_num}"
+
+    # Ensure full cleanup before saving
+    if os.path.exists(output_dir):
+        shutil.rmtree(output_dir)
+        time.sleep(1) 
+
+    # Save to temp directory and move
+    temp_dir = tempfile.mkdtemp()
+    df.save_to_disk(temp_dir)
+
+    shutil.move(temp_dir, output_dir)  # Move new dataset to original location
+
 def load_model_variants_df(df_name):
     """
     function to load model-variants df
@@ -114,7 +135,12 @@ def load_model_variants_gen_df(df_name):
     """
     return pd.read_csv(f"model-variants/gen/{df_name}.csv", header=0, encoding="utf-8")
 
-def load_model_variants_hf(df_name):
+def natural_sort_key(path):
+    """Extracts numeric chunk index from 'chunk_0', 'chunk_1', etc., for correct sorting."""
+    match = re.search(r"chunk_(\d+)", path)  # Extracts the number
+    return int(match.group(1)) if match else float('inf') 
+
+def load_model_variants_hf(df_name, chunk_num=None):
     """
     Function to load model-variants df, handling both chunked and non-chunked datasets.
     """
@@ -124,12 +150,18 @@ def load_model_variants_hf(df_name):
     # Check if dataset is chunked or a single dataset
     chunk_paths = sorted([
         os.path.join(output_dir, d) for d in os.listdir(output_dir) if os.path.isdir(os.path.join(output_dir, d))
-    ])
+    ], key=natural_sort_key) 
 
     if chunk_paths:
-        # If multiple subdirectories exist, assume dataset is chunked
-        chunks = [load_from_disk(chunk_path) for chunk_path in chunk_paths]
-        full_dataset = concatenate_datasets(chunks)
+        if chunk_num is not None:
+            # if chunk_num is defined
+            chunk_path = chunk_paths[chunk_num]
+            print(chunk_path)
+            full_dataset = load_from_disk(chunk_path)
+        else:
+            # If multiple subdirectories exist, assume dataset is chunked
+            chunks = [load_from_disk(chunk_path) for chunk_path in chunk_paths]
+            full_dataset = concatenate_datasets(chunks)
     else:
         # If no chunks are found, load as a single dataset
         full_dataset = load_from_disk(output_dir)
