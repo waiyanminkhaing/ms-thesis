@@ -149,8 +149,10 @@ def load_model_variants_hf(df_name, chunk_num=None):
 
     # Check if dataset is chunked or a single dataset
     chunk_paths = sorted([
-        os.path.join(output_dir, d) for d in os.listdir(output_dir) if os.path.isdir(os.path.join(output_dir, d))
-    ], key=natural_sort_key) 
+        os.path.join(output_dir, d) 
+        for d in os.listdir(output_dir) 
+        if os.path.isdir(os.path.join(output_dir, d)) and d.startswith("chunk_")
+    ], key=natural_sort_key)
 
     if chunk_paths:
         if chunk_num is not None:
