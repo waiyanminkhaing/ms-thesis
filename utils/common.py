@@ -91,41 +91,44 @@ def generate_masked_predictions_hf_batch(dataset, model, tokenizer, device, batc
 
     return dataset
 
-def generate_mt5_predictions_hf_batch(dataset, model, tokenizer, device, batch_size=16, max_length=512):
+def generate_mt5_predictions_hf_batch(dataset, model, tokenizer, device, batch_size=64, max_length=256):
     """
     Generates predictions for mT5 model LoRA in batches.
+    Optimized for speed by reducing unnecessary overhead.
     """
 
-    def predict_fn(batch):
-        # Tokenize source text (English input)
-        inputs = tokenizer(
-            batch["burmese"],
-            padding="max_length",
-            truncation=True,
-            max_length=max_length,
-            return_tensors="pt"
-        ).to(device)
+    # Pre-tokenize the entire dataset before .map()
+    dataset = dataset.map(
+        lambda batch: tokenizer(batch["burmese"], padding="max_length", truncation=True, max_length=max_length),
+        batched=True
+    )
 
-        # Generate predictions using the fine-tuned model
+    def predict_fn(batch):
+        # Move input tensors to GPU
+        inputs = {k: torch.tensor(v).to(device) for k, v in batch.items() if k in ["input_ids", "attention_mask"]}
+
+        # Reduce num_beams for faster inference
         with torch.no_grad():
             output_tokens = model.generate(
                 **inputs,
                 max_length=max_length,
-                do_sample=True,  # Enables diverse outputs
-                top_k=50,  # Keeps high-quality token selection
-                top_p=0.95,  # Ensures better word diversity
-                temperature=0.6,  # Keeps Burmese fluency structured
-                repetition_penalty=1.8,  # Avoids repetition of words
-                num_beams=5  # Forces the model to generate more contextually correct Burmese
+                do_sample=True,
+                top_k=50,  # Ensures better word diversity
+                top_p=0.95,
+                temperature=0.7,  # More natural text generation
+                repetition_penalty=1.5,  # Avoids excessive repetition
+                num_beams=3,  # Reduced for faster inference
+                num_return_sequences=1
             )
 
-        # Decode predictions
-        generated_texts = tokenizer.batch_decode(output_tokens, skip_special_tokens=True)
+        # Use batch decoding with `clean_up_tokenization_spaces=True`
+        generated_texts = tokenizer.batch_decode(output_tokens, skip_special_tokens=True, clean_up_tokenization_spaces=True)
 
         return {"generated": generated_texts}
 
-    # Process dataset in batches
+    # Process dataset in larger batches
     dataset = dataset.map(predict_fn, batched=True, batch_size=batch_size)
+    dataset = dataset.remove_columns(["input_ids", "attention_mask"])
 
     return dataset
 
