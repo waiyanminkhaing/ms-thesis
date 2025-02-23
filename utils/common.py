@@ -91,55 +91,41 @@ def generate_masked_predictions_hf_batch(dataset, model, tokenizer, device, batc
 
     return dataset
 
-# Function to Generate Predictions and Store in Dataset
-def generate_predictions_mT5_hf_batch(dataset, model, tokenizer, device, batch_size=16):
+def generate_mt5_predictions_hf_batch(dataset, model, tokenizer, device, batch_size=16, max_length=512):
     """
-    Generates batch predictions for mT5
+    Generates predictions for mT5 model LoRA in batches.
     """
-    # Tokenization Function
-    def tokenize_function(examples):
-        return tokenizer(
-            examples["english"],
+
+    def predict_fn(batch):
+        # Tokenize source text (English input)
+        inputs = tokenizer(
+            batch["burmese"],
             padding="max_length",
             truncation=True,
-            max_length=128,
+            max_length=max_length,
             return_tensors="pt"
-        )
+        ).to(device)
 
-    # Tokenize Dataset
-    tokenized_dataset = dataset.map(tokenize_function, batched=True, desc="Tokenizing")
-
-    # ✅ Ensure Tokenized Data is in Correct Tensor Format
-    def format_to_tensors(examples):
-        return {
-            "input_ids": torch.tensor(examples["input_ids"], dtype=torch.long),
-            "attention_mask": torch.tensor(examples["attention_mask"], dtype=torch.long),
-        }
-
-    tokenized_dataset = tokenized_dataset.map(format_to_tensors, batched=True, desc="Formatting to tensors")
-
-    # Data Collator for Dynamic Padding
-    data_collator = DataCollatorWithPadding(tokenizer, return_tensors="pt")
-
-    # Create DataLoader for GPU Processing
-    dataloader = torch.utils.data.DataLoader(tokenized_dataset, batch_size=batch_size, collate_fn=data_collator)
-
-    predictions = []
-
-    # Run Inference in Batches on GPU
-    for batch in dataloader:
-        batch = {k: v.to(device) for k, v in batch.items()}  # Move batch to GPU
-
+        # Generate predictions using the fine-tuned model
         with torch.no_grad():
-            output_tokens = model.generate(**batch, max_length=128, num_beams=5, early_stopping=True)
+            output_tokens = model.generate(
+                **inputs,
+                max_length=max_length,
+                do_sample=True,  # Enables diverse outputs
+                top_k=50,  # Keeps high-quality token selection
+                top_p=0.95,  # Ensures better word diversity
+                temperature=0.6,  # Keeps Burmese fluency structured
+                repetition_penalty=1.8,  # Avoids repetition of words
+                num_beams=5  # Forces the model to generate more contextually correct Burmese
+            )
 
-        # Decode Predictions
-        batch_predictions = tokenizer.batch_decode(output_tokens, skip_special_tokens=True)
-        predictions.extend(batch_predictions)
+        # Decode predictions
+        generated_texts = tokenizer.batch_decode(output_tokens, skip_special_tokens=True)
 
-    # Add Predictions as a Column in the Dataset
-    dataset = dataset.add_column("generated", predictions)
-    dataset = dataset[["english", "burmese", "generated"]]
+        return {"generated": generated_texts}
+
+    # Process dataset in batches
+    dataset = dataset.map(predict_fn, batched=True, batch_size=batch_size)
 
     return dataset
 
