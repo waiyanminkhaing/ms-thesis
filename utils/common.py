@@ -13,13 +13,29 @@ from sacrebleu.metrics import CHRF
 from tqdm.notebook import tqdm
 from transformers import (
     AutoTokenizer, AutoModelForSeq2SeqLM, AutoModelForMaskedLM,
-    DataCollatorWithPadding,
 )
-from peft import PeftModel
+from peft import LoraConfig, get_peft_model, PeftModel, PeftConfig
 import matplotlib.pyplot as plt
 
 # Suppress specific UserWarnings
 warnings.filterwarnings("ignore", category=UserWarning, module="peft.peft_model")
+
+TRAIN_ARGS = {
+    "warmup_steps": 500,
+    "weight_decay": 0.01,
+    "save_strategy": "epoch",
+    "save_total_limit": 2,
+    "fp16": False,
+    "bf16": True,
+    "eval_strategy": "epoch",
+    "load_best_model_at_end": True,
+    "metric_for_best_model": "loss",
+    "greater_is_better": False,
+    "logging_steps": 1000,
+    "optim": "adamw_torch_fused",
+    "auto_find_batch_size": True,
+    "disable_tqdm": False,
+}
 
 # Function to generate masked predictions
 def generate_masked_predictions_batch(dataloader, model, tokenizer, device):
@@ -91,23 +107,22 @@ def generate_masked_predictions_hf_batch(dataset, model, tokenizer, device, batc
 
     return dataset
 
-def generate_mt5_predictions_hf_batch(dataset, model, tokenizer, device, batch_size=64, max_length=256):
+def generate_mt5_predictions_hf_batch(dataset, model, tokenizer, device, batch_size=16, max_length=512):
     """
-    Generates predictions for mT5 model LoRA in batches.
-    Optimized for speed by reducing unnecessary overhead.
+    Generates predictions for mT5 model LoRA in batches, with correct padding and masking.
     """
-
-    # Pre-tokenize the entire dataset before .map()
-    dataset = dataset.map(
-        lambda batch: tokenizer(batch["burmese"], padding="max_length", truncation=True, max_length=max_length),
-        batched=True
-    )
 
     def predict_fn(batch):
-        # Move input tensors to GPU
-        inputs = {k: torch.tensor(v).to(device) for k, v in batch.items() if k in ["input_ids", "attention_mask"]}
+        # Tokenize source text (input) with padding and attention masks
+        inputs = tokenizer(
+            batch["burmese"],
+            padding=True,  # Use dynamic padding
+            truncation=True,
+            max_length=max_length,
+            return_tensors="pt"
+        ).to(device)
 
-        # Reduce num_beams for faster inference
+        # Generate predictions using the fine-tuned model
         with torch.no_grad():
             output_tokens = model.generate(
                 **inputs,
@@ -121,14 +136,13 @@ def generate_mt5_predictions_hf_batch(dataset, model, tokenizer, device, batch_s
                 num_return_sequences=1
             )
 
-        # Use batch decoding with `clean_up_tokenization_spaces=True`
-        generated_texts = tokenizer.batch_decode(output_tokens, skip_special_tokens=True, clean_up_tokenization_spaces=True)
+        # Decode predictions
+        generated_texts = tokenizer.batch_decode(output_tokens, skip_special_tokens=True)
 
         return {"generated": generated_texts}
 
-    # Process dataset in larger batches
+    # Process dataset in batches
     dataset = dataset.map(predict_fn, batched=True, batch_size=batch_size)
-    dataset = dataset.remove_columns(["input_ids", "attention_mask"])
 
     return dataset
 
@@ -346,6 +360,53 @@ def convert_to_mean_scores_df(datasets):
 
     return benchmarking_mean_scores_df
 
+def apply_lora(model, model_name, device):
+    """
+    Applies LoRA for efficient fine-tuning.
+    """
+
+    # Select correct LoRA target layers
+    if "t5" in model_name.lower():
+        target_modules = ["q", "v"]  # LoRA for T5/mT5
+    else:
+        target_modules = ["query", "value"]  # LoRA for BERT
+
+    # Define LoRA Configuration
+    lora_config = LoraConfig(
+        r=8,                    # Rank of LoRA matrices
+        lora_alpha=16,          # Scaling factor
+        target_modules=target_modules,  
+        lora_dropout=0.1,       # Prevents overfitting
+    )
+
+    # Apply LoRA
+    model = get_peft_model(model, lora_config)
+
+    # Move model to GPU
+    model = model.to(device)
+
+    print(f"LoRA applied to {model_name} (Target Modules: {target_modules})")
+    
+    return model
+
+def get_prefix(model, device):
+    # Prefix
+    prefix_length = 10
+    num_prefixes = model.config.num_layers * 2
+    prefix_projection_dim = 512
+
+    # Create the prefix embeddings:
+    prefixes = torch.nn.Embedding(num_prefixes, prefix_length * prefix_projection_dim).to(device)
+    print("Device of prefixes:", prefixes.weight.device)
+
+    # Create the prefix projection layer
+    prefix_projection = torch.nn.Sequential(
+        torch.nn.Linear(prefix_length * prefix_projection_dim, model.config.d_model),
+        torch.nn.Tanh()  # Or another activation function
+    ).to(device)
+
+    return prefixes, prefix_projection
+
 def get_fine_tuned_model_from_path(path, base_model_name, device):
     # load base model and tokenizer
     if "t5" in base_model_name.lower():
@@ -361,8 +422,11 @@ def get_fine_tuned_model_from_path(path, base_model_name, device):
     # move to GPU
     model = model.to(device)
 
-    return model, tokenizer
+    # Check PEFT configuration
+    peft_config = PeftConfig.from_pretrained(path)
+    print("PEFT Config:", peft_config)
 
+    return model, tokenizer
 
 # function to get fine tuned model
 def get_fine_tuned_model(model_name, spt_name, base_model_name, device):
@@ -373,6 +437,11 @@ def get_fine_tuned_model(model_name, spt_name, base_model_name, device):
 # function to get embeddings fine tuned model
 def get_embedded_fine_tuned_model(model_name, spt_name, base_model_name, device):
     model_path = f"model-variants/models/Embedded_{model_name}_{spt_name.upper()}"
+
+    return get_fine_tuned_model_from_path(model_path, base_model_name, device)
+
+def get_prefix_fine_tuned_model(model_name, spt_name, base_model_name, device):
+    model_path = f"model-variants/models/Prefix_{model_name}_{spt_name.upper()}"
 
     return get_fine_tuned_model_from_path(model_path, base_model_name, device)
 
