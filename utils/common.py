@@ -14,7 +14,7 @@ from tqdm.notebook import tqdm
 from transformers import (
     AutoTokenizer, AutoModelForSeq2SeqLM, AutoModelForMaskedLM,
 )
-from peft import LoraConfig, get_peft_model, PeftModel, PeftConfig
+from peft import LoraConfig, get_peft_model, PeftModel
 import matplotlib.pyplot as plt
 
 # Suppress specific UserWarnings
@@ -389,24 +389,6 @@ def apply_lora(model, model_name, device):
     
     return model
 
-def get_prefix(model, device):
-    # Prefix
-    prefix_length = 10
-    num_prefixes = model.config.num_layers * 2
-    prefix_projection_dim = 512
-
-    # Create the prefix embeddings:
-    prefixes = torch.nn.Embedding(num_prefixes, prefix_length * prefix_projection_dim).to(device)
-    print("Device of prefixes:", prefixes.weight.device)
-
-    # Create the prefix projection layer
-    prefix_projection = torch.nn.Sequential(
-        torch.nn.Linear(prefix_length * prefix_projection_dim, model.config.d_model),
-        torch.nn.Tanh()  # Or another activation function
-    ).to(device)
-
-    return prefixes, prefix_projection
-
 def get_fine_tuned_model_from_path(path, base_model_name, device):
     # load base model and tokenizer
     if "t5" in base_model_name.lower():
@@ -422,10 +404,6 @@ def get_fine_tuned_model_from_path(path, base_model_name, device):
     # move to GPU
     model = model.to(device)
 
-    # Check PEFT configuration
-    peft_config = PeftConfig.from_pretrained(path)
-    print("PEFT Config:", peft_config)
-
     return model, tokenizer
 
 # function to get fine tuned model
@@ -437,11 +415,6 @@ def get_fine_tuned_model(model_name, spt_name, base_model_name, device):
 # function to get embeddings fine tuned model
 def get_embedded_fine_tuned_model(model_name, spt_name, base_model_name, device):
     model_path = f"model-variants/models/Embedded_{model_name}_{spt_name.upper()}"
-
-    return get_fine_tuned_model_from_path(model_path, base_model_name, device)
-
-def get_prefix_fine_tuned_model(model_name, spt_name, base_model_name, device):
-    model_path = f"model-variants/models/Prefix_{model_name}_{spt_name.upper()}"
 
     return get_fine_tuned_model_from_path(model_path, base_model_name, device)
 
