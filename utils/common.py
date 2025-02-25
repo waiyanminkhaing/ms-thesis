@@ -107,13 +107,12 @@ def generate_masked_predictions_hf_batch(dataset, model, tokenizer, device, batc
 
     return dataset
 
-def generate_mt5_predictions_hf_batch(dataset, model, tokenizer, device, batch_size=16, max_length=512):
+def generate_mt5_predictions_hf_batch(dataset, model, tokenizer, device, batch_size=128, max_length=512):
     """
     Generates predictions for mT5 model LoRA in batches, with correct padding and masking.
     """
 
     def predict_fn(batch):
-        # Tokenize source text (input) with padding and attention masks
         inputs = tokenizer(
             batch["burmese"],
             padding=True,  # Use dynamic padding
@@ -121,19 +120,13 @@ def generate_mt5_predictions_hf_batch(dataset, model, tokenizer, device, batch_s
             max_length=max_length,
             return_tensors="pt"
         ).to(device)
-
-        # Generate predictions using the fine-tuned model
+        
         with torch.no_grad():
             output_tokens = model.generate(
                 **inputs,
-                max_length=max_length,
-                do_sample=True,
-                top_k=50,  # Ensures better word diversity
-                top_p=0.95,
-                temperature=0.7,  # More natural text generation
+                num_beams=2,
+                use_cache=True,
                 repetition_penalty=1.5,  # Avoids excessive repetition
-                num_beams=3,  # Reduced for faster inference
-                num_return_sequences=1
             )
 
         # Decode predictions
