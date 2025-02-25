@@ -299,34 +299,23 @@ def compute_multilingual_masked_perplexity_hf_batch(texts, model, tokenizer, dev
 
     return perplexity_scores
 
-def compute_multilingual_mt5_perplexity_batch(texts, model, tokenizer, device):
+def compute_mt5_perplexity_batch(texts, model, tokenizer, device):
     """
     Computes perplexity for a batch of text using an mT5 model.
     """
     # Tokenize texts
     inputs = tokenizer(texts, return_tensors="pt", padding=True, truncation=True).to(device)
+    
+    # Labels should be the same as input_ids, but pad tokens should be ignored in loss computation
+    labels = inputs["input_ids"].clone()
+    labels[labels == tokenizer.pad_token_id] = -100  # Ignore padding tokens in loss calculation
 
     with torch.no_grad():
-        outputs = model(**inputs)  # Forward pass
-        logits = outputs.logits / 1.5  # Temperature scaling
+        outputs = model(input_ids=inputs["input_ids"], attention_mask=inputs["attention_mask"], labels=labels)
+        loss_per_token = outputs.loss  # This is averaged over all tokens
 
-    # Compute log probabilities
-    log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
-
-    # Get token log-likelihoods using true token IDs
-    target_ids = inputs["input_ids"]
-    log_likelihood = log_probs.gather(dim=-1, index=target_ids.unsqueeze(-1)).squeeze(-1)
-
-    # Apply attention mask to remove padding contributions
-    mask = inputs["attention_mask"]
-    masked_log_likelihood = log_likelihood * mask  # Zero out padding tokens
-
-    # Compute sentence-level mean log-likelihood
-    sentence_log_likelihood = masked_log_likelihood.sum(dim=1) / mask.sum(dim=1)
-
-    # Convert log-likelihood to perplexity
-    log_perplexity = -sentence_log_likelihood
-    perplexity_scores = torch.exp(log_perplexity).cpu().numpy()
+    # Compute sentence-level perplexity
+    perplexity_scores = torch.exp(loss_per_token).cpu().numpy()
 
     return perplexity_scores
 
