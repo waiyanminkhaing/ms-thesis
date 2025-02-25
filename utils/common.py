@@ -305,17 +305,35 @@ def compute_mt5_perplexity_batch(texts, model, tokenizer, device):
     """
     # Tokenize texts
     inputs = tokenizer(texts, return_tensors="pt", padding=True, truncation=True).to(device)
-    
-    # Labels should be the same as input_ids, but pad tokens should be ignored in loss computation
+
+    # Prepare labels (same as input_ids, but padding tokens should be ignored)
     labels = inputs["input_ids"].clone()
     labels[labels == tokenizer.pad_token_id] = -100  # Ignore padding tokens in loss calculation
 
     with torch.no_grad():
         outputs = model(input_ids=inputs["input_ids"], attention_mask=inputs["attention_mask"], labels=labels)
-        loss_per_token = outputs.loss  # This is averaged over all tokens
+        logits = outputs.logits  # (batch_size, seq_len, vocab_size)
 
-    # Compute sentence-level perplexity
-    perplexity_scores = torch.exp(loss_per_token).cpu().numpy()
+    # Shift logits and labels (T5 uses shifted decoding)
+    shift_logits = logits[:, :-1, :].contiguous()
+    shift_labels = labels[:, 1:].contiguous()
+    shift_attention_mask = inputs["attention_mask"][:, 1:].contiguous()
+
+    # Compute per-token loss (cross-entropy)
+    loss_fn = torch.nn.CrossEntropyLoss(reduction="none")
+    per_token_loss = loss_fn(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+
+    # Reshape loss to match batch size
+    per_token_loss = per_token_loss.view(shift_labels.shape)
+
+    # Mask out padding tokens
+    per_token_loss *= shift_attention_mask
+
+    # Compute sentence-level mean loss (ignoring padding)
+    sentence_loss = per_token_loss.sum(dim=1) / shift_attention_mask.sum(dim=1)
+
+    # Convert sentence loss to perplexity
+    perplexity_scores = torch.exp(sentence_loss).cpu().numpy()
 
     return perplexity_scores
 
