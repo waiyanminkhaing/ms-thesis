@@ -85,12 +85,10 @@ def save_model_variants_gen_df(df, df_name):
     """
     df.to_csv(f"model-variants/gen/{df_name}.csv", index=False, encoding="utf-8")
 
-def save_model_variants_hf(df, df_name, num_chunks=1): 
+def save_hf(df, output_dir, num_chunks=1):
     """
-    Function to save model-variants df in arrow format
+    Function to save df in arrow format
     """
-    output_dir = f"model-variants/data/{df_name}_hf_dataset"
-
     if num_chunks > 1:
         os.makedirs(output_dir, exist_ok=True)
 
@@ -105,6 +103,22 @@ def save_model_variants_hf(df, df_name, num_chunks=1):
             start = end  # Move to next chunk
     else:
         df.save_to_disk(output_dir)
+
+def save_model_variants_hf(df, df_name, num_chunks=1): 
+    """
+    Function to save model-variants df in arrow format
+    """
+    output_dir = f"model-variants/data/{df_name}_hf_dataset"
+
+    save_hf(df, output_dir, num_chunks)
+
+def save_model_variants_gen_hf(df, df_name, num_chunks=1): 
+    """
+    Function to save model-variants gen df in arrow format
+    """
+    output_dir = f"model-variants/gen/{df_name}_hf_dataset"
+
+    save_hf(df, output_dir, num_chunks)
 
 def save_model_variants_chunk_hf(df, df_name, chunk_num): 
     """
@@ -140,13 +154,10 @@ def natural_sort_key(path):
     match = re.search(r"chunk_(\d+)", path)  # Extracts the number
     return int(match.group(1)) if match else float('inf') 
 
-def load_model_variants_hf(df_name, chunk_num=None):
+def load_hf(output_dir, chunk_num=None):
     """
-    Function to load model-variants df, handling both chunked and non-chunked datasets.
+    Function to load hf, handling both chunked and non-chunked datasets.
     """
-    # Define the directory where the dataset is stored
-    output_dir = f"model-variants/data/{df_name}_hf_dataset"
-
     # Check if dataset is chunked or a single dataset
     chunk_paths = sorted([
         os.path.join(output_dir, d) 
@@ -169,6 +180,24 @@ def load_model_variants_hf(df_name, chunk_num=None):
         full_dataset = load_from_disk(output_dir)
 
     return full_dataset
+
+def load_model_variants_hf(df_name, chunk_num=None):
+    """
+    Function to load model-variants hf
+    """
+    # Define the directory where the dataset is stored
+    output_dir = f"model-variants/data/{df_name}_hf_dataset"
+
+    load_hf(output_dir, chunk_num)
+
+def load_model_variants_gen_hf(df_name, chunk_num=None):
+    """
+    Function to load model-variants gen hf
+    """
+    # Define the directory where the dataset is stored
+    output_dir = f"model-variants/gen/{df_name}_hf_dataset"
+
+    load_hf(output_dir, chunk_num)
 
 def convert_to_hf(dataset):
     """
