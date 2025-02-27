@@ -188,7 +188,7 @@ def load_model_variants_hf(df_name, chunk_num=None):
     # Define the directory where the dataset is stored
     output_dir = f"model-variants/data/{df_name}_hf_dataset"
 
-    load_hf(output_dir, chunk_num)
+    return load_hf(output_dir, chunk_num)
 
 def load_model_variants_gen_hf(df_name, chunk_num=None):
     """
@@ -197,7 +197,7 @@ def load_model_variants_gen_hf(df_name, chunk_num=None):
     # Define the directory where the dataset is stored
     output_dir = f"model-variants/gen/{df_name}_hf_dataset"
 
-    load_hf(output_dir, chunk_num)
+    return load_hf(output_dir, chunk_num)
 
 def convert_to_hf(dataset):
     """
